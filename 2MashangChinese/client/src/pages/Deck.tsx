@@ -119,14 +119,19 @@ function ReviewSession({
     new Set(initialSession?.reviewedKeys ?? [])
   );
   const [sessionDone, setSessionDone] = useState(
-    // Restore done state: if session was completed AND no new cards have appeared
     () => (initialSession?.isDone ?? false) && initialQueueRef.current.length === 0
   );
   const [largeFontMode, setLargeFontMode] = useState(false);
-  // pendingNext holds the next card to show AFTER the flip-back animation completes,
-  // preventing the next card's back face from being briefly visible during the transition.
-  const pendingNextRef = useRef<FlashCard | null>(null);
+  // Prevent double-rating: lock buttons while async rateCard is in flight
+  const [rating, setRating] = useState(false);
+
+  // Timer ref for the card-flip animation — cleaned up on unmount
   const flipAnimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clean up any pending timer on unmount
+  useEffect(() => {
+    return () => { if (flipAnimTimerRef.current) clearTimeout(flipAnimTimerRef.current); };
+  }, []);
 
   const speak = useCallback((text: string) => {
     if (!window.speechSynthesis) return;
@@ -147,44 +152,54 @@ function ReviewSession({
     });
   }, [current, settings.playAudioOnFlip, speak]);
 
-  const handleRate = useCallback(async (rating: Rating) => {
-    if (!current) return;
-    const updatedCard = await rateCard(current, rating, settings.desiredRetention, settings.maxInterval);
-    // Fire-and-forget: push the updated card to the server so progress persists
-    // across logins. Do NOT await — we don't want to block the UI.
+  const handleRate = useCallback(async (selectedRating: Rating) => {
+    if (!current || rating) return; // guard: ignore taps while async is in flight
+    setRating(true);
+
+    const updatedCard = await rateCard(current, selectedRating, settings.desiredRetention, settings.maxInterval);
+
+    // Fire-and-forget server push — progress survives a hard refresh
     utils.client.sync.pushFlashcards.mutate([{
-      word: updatedCard.word,
-      cardType: updatedCard.cardType,
-      stability: updatedCard.stability,
-      difficulty: updatedCard.difficulty,
-      scheduledDays: updatedCard.scheduledDays,
-      elapsedDays: updatedCard.elapsedDays,
-      reps: updatedCard.reps,
-      lapses: updatedCard.lapses,
-      isLeech: updatedCard.isLeech,
-      state: updatedCard.state,
-      dueDate: updatedCard.dueDate,
-      lastReviewed: updatedCard.lastReviewed,
-      pinyin: updatedCard.pinyin,
-      definition: updatedCard.definition,
-      hskBand: updatedCard.hskBand,
-      storyId: updatedCard.storyId,
-      updatedAt: updatedCard.updatedAt,
-    }]).catch((err) => {
-      console.warn("[Deck] Failed to push card to server (will sync later):", err);
-    });
+      word: updatedCard.word, cardType: updatedCard.cardType,
+      stability: updatedCard.stability, difficulty: updatedCard.difficulty,
+      scheduledDays: updatedCard.scheduledDays, elapsedDays: updatedCard.elapsedDays,
+      reps: updatedCard.reps, lapses: updatedCard.lapses, isLeech: updatedCard.isLeech,
+      state: updatedCard.state, dueDate: updatedCard.dueDate, lastReviewed: updatedCard.lastReviewed,
+      pinyin: updatedCard.pinyin, definition: updatedCard.definition,
+      hskBand: updatedCard.hskBand, storyId: updatedCard.storyId, updatedAt: updatedCard.updatedAt,
+    }]).catch((err) => console.warn("[Deck] Server push failed (will retry on sync):", err));
+
     const newReviewed = reviewed + 1;
     const newReviewedKey = serializeKey(current);
-    const newReviewedKeys = new Set(Array.from(reviewedKeys).concat(newReviewedKey));
+    const newReviewedKeys = new Set([...reviewedKeys, newReviewedKey]);
     setReviewed(newReviewed);
     setReviewedKeys(newReviewedKeys);
 
-    const remaining = queue.slice(1);
-    const isDone = remaining.length === 0;
+    // ── Re-insertion logic ────────────────────────────────────────────────────
+    // FSRS sets dueDate a few minutes ahead for Again/Hard/Good on New or Learning
+    // cards (state=Learning). These must come back in the same session — exactly
+    // like Anki. Only "graduated" cards (state=Review, due in days) leave for good.
+    //
+    // We re-insert the card 4 positions from the front of the remaining queue so
+    // it doesn't immediately follow itself, but returns relatively soon.
+    const rest = queue.slice(1);
+    const DUE_SOON_MS = 20 * 60 * 1000; // cards due within 20 min → re-insert
+    const isDueSoon = updatedCard.dueDate - Date.now() < DUE_SOON_MS;
 
-    // Persist after every rating
+    let newQueue: FlashCard[];
+    if (isDueSoon && rest.length > 0) {
+      // Insert a few positions in — not immediately, but not at the very end
+      const insertAt = Math.min(rest.length, 4);
+      newQueue = [...rest.slice(0, insertAt), updatedCard, ...rest.slice(insertAt)];
+    } else {
+      // Card graduated (due tomorrow or later) — remove from this session
+      newQueue = rest;
+    }
+
+    const isDone = newQueue.length === 0;
+
     const updatedSession: PersistedSession = {
-      date: new Date().toLocaleDateString("sv"), // "YYYY-MM-DD"
+      date: new Date().toLocaleDateString("sv"),
       deckKey: [...deckIds].sort().join(","),
       originalQueue: originalQueueRef.current,
       reviewedKeys: Array.from(newReviewedKeys),
@@ -196,27 +211,27 @@ function ReviewSession({
 
     if (isDone) {
       setSessionDone(true);
+      setRating(false);
       onDone(newReviewed);
     } else {
-      setQueue(remaining);
-      // Stage the next card — flip back first, then swap content after animation
-      pendingNextRef.current = remaining[0];
+      const next = newQueue[0];
+      setQueue(newQueue);
+      // Flip face-down first; swap content at the midpoint of the animation
+      // so the new card's back face is never briefly visible.
       setFlipped(false);
-      // Clear any previous timer
       if (flipAnimTimerRef.current) clearTimeout(flipAnimTimerRef.current);
-      // Swap card content after the CSS transition (0.5s) completes
       flipAnimTimerRef.current = setTimeout(() => {
-        setCurrent(pendingNextRef.current);
-        pendingNextRef.current = null;
-      }, 520); // slightly longer than the 0.5s CSS transition
+        setCurrent(next);
+        setRating(false);
+      }, 260); // half the 0.5s CSS flip transition
     }
-  }, [current, queue, reviewed, reviewedKeys, deckIds, settings, onDone, onSaveSession]);
+  }, [current, queue, reviewed, reviewedKeys, deckIds, settings, rating, onDone, onSaveSession, utils]);
 
   // Keyboard shortcuts
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === " ") { e.preventDefault(); handleFlip(); }
-      if (flipped) {
+      if (flipped && !rating) {
         if (e.key === "1") handleRate(Rating.Again);
         if (e.key === "2") handleRate(Rating.Hard);
         if (e.key === "3") handleRate(Rating.Good);
@@ -225,7 +240,7 @@ function ReviewSession({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [flipped, handleFlip, handleRate]);
+  }, [flipped, handleFlip, handleRate, rating]);
 
   if (sessionDone || !current) {
     return (
@@ -332,17 +347,19 @@ function ReviewSession({
       {flipped && (
         <div className="grid grid-cols-2 gap-3">
           {[
-            { rating: Rating.Again, label: "Again", icon: <RotateCcw className="w-5 h-5" />, bg: "bg-red-50 dark:bg-red-950/40",    text: "text-red-500",    border: "border-red-200 dark:border-red-800",    hover: "hover:bg-red-100 dark:hover:bg-red-900/50" },
-            { rating: Rating.Good,  label: "Good",  icon: <Check className="w-5 h-5" />,      bg: "bg-green-50 dark:bg-green-950/40", text: "text-green-600",  border: "border-green-200 dark:border-green-800",  hover: "hover:bg-green-100 dark:hover:bg-green-900/50" },
-            { rating: Rating.Hard,  label: "Hard",  icon: null,                                bg: "bg-yellow-50 dark:bg-yellow-950/40",text: "text-yellow-600", border: "border-yellow-200 dark:border-yellow-800", hover: "hover:bg-yellow-100 dark:hover:bg-yellow-900/50" },
-            { rating: Rating.Easy,  label: "Easy",  icon: null,                                bg: "bg-sky-50 dark:bg-sky-950/40",     text: "text-sky-500",   border: "border-sky-200 dark:border-sky-800",     hover: "hover:bg-sky-100 dark:hover:bg-sky-900/50" },
-          ].map(({ rating, label, icon, bg, text, border, hover }) => (
+            { r: Rating.Again, label: "Again", icon: <RotateCcw className="w-5 h-5" />, bg: "bg-red-50 dark:bg-red-950/40",    text: "text-red-500",    border: "border-red-200 dark:border-red-800",    hover: "hover:bg-red-100 dark:hover:bg-red-900/50" },
+            { r: Rating.Good,  label: "Good",  icon: <Check className="w-5 h-5" />,      bg: "bg-green-50 dark:bg-green-950/40", text: "text-green-600",  border: "border-green-200 dark:border-green-800",  hover: "hover:bg-green-100 dark:hover:bg-green-900/50" },
+            { r: Rating.Hard,  label: "Hard",  icon: null,                                bg: "bg-yellow-50 dark:bg-yellow-950/40",text: "text-yellow-600", border: "border-yellow-200 dark:border-yellow-800", hover: "hover:bg-yellow-100 dark:hover:bg-yellow-900/50" },
+            { r: Rating.Easy,  label: "Easy",  icon: null,                                bg: "bg-sky-50 dark:bg-sky-950/40",     text: "text-sky-500",   border: "border-sky-200 dark:border-sky-800",     hover: "hover:bg-sky-100 dark:hover:bg-sky-900/50" },
+          ].map(({ r, label, icon, bg, text, border, hover }) => (
             <button
-              key={rating}
-              onClick={() => handleRate(rating)}
+              key={r}
+              onClick={() => handleRate(r)}
+              disabled={rating}
               className={cn(
                 "flex flex-col items-center justify-center py-4 px-3 rounded-xl border font-semibold transition-colors",
-                bg, text, border, hover
+                bg, text, border,
+                rating ? "opacity-50 cursor-not-allowed" : hover
               )}
             >
               {icon && <span className="mb-1">{icon}</span>}
@@ -541,6 +558,7 @@ export default function Deck() {
   const { user } = useAuth();
   const userId = user?.email ?? undefined;
   const { onSyncComplete } = useAuthContext();
+  const utils = trpc.useUtils();
 
   const [allCards, setAllCards] = useState<FlashCard[]>([]);
   const [loading, setLoading] = useState(true);
@@ -619,11 +637,17 @@ export default function Deck() {
     loadAll();
   }, [loadAll]);
 
-  // Reload data whenever a background sync finishes — this is what keeps all
-  // numbers consistent after the tab is restored or sync fires in background
+  // Reload data whenever a background sync finishes
   useEffect(() => {
     return onSyncComplete(() => { loadAll(); });
   }, [onSyncComplete, loadAll]);
+
+  // Also reload when the user returns to this tab (e.g. after reviewing on another page)
+  useEffect(() => {
+    const handler = () => { if (document.visibilityState === "visible") loadAll(); };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [loadAll]);
 
   // Load persisted session whenever deck selection changes
   useEffect(() => {
@@ -712,19 +736,22 @@ export default function Deck() {
       Array.from(deckWordSets[id] ?? []).forEach((w) => allowedWords.add(w));
     });
 
-    // When no decks selected, show global totals so the word list still makes sense
     const scopedCards = selectedDeckIds.size === 0
       ? allCards
       : allCards.filter((c) => allowedWords.has(c.word));
 
-    // For state counts, always use zh_en cards as the canonical "one per word" view
+    // Use zh_en as canonical "one per word"
     const perWordCards = scopedCards.filter((c) => c.cardType === "zh_en");
+    const now = Date.now();
 
     return {
       uniqueWords: new Set(scopedCards.map((c) => c.word)),
-      newWords: perWordCards.filter((c) => c.state === 0),
-      learningWords: perWordCards.filter((c) => c.state === 1),
-      reviewWords: perWordCards.filter((c) => c.state === 2),
+      // "New" = state 0 AND due today — so it matches what's actually in the review queue
+      newWords: perWordCards.filter((c) => c.state === 0 && c.dueDate <= now),
+      // "Learning" = state 1 (in learning steps), due today
+      learningWords: perWordCards.filter((c) => c.state === 1 && c.dueDate <= now),
+      // "Review" = state 2 (graduated), due today
+      reviewWords: perWordCards.filter((c) => c.state === 2 && c.dueDate <= now),
     };
   }, [allCards, deckWordSets, selectedDeckIds]);
 
@@ -808,6 +835,26 @@ export default function Deck() {
             // Reload the persisted session to reflect isDone=true
             const updated = await loadSession(Array.from(selectedDeckIds), userId);
             setPersistedSession(updated);
+            // Push all reviewed cards to server immediately so Dashboard and
+            // other devices see 0 due right away without waiting for the 3-min sync
+            try {
+              const freshCards = await getAllCards();
+              if (freshCards.length > 0) {
+                await utils.client.sync.pushFlashcards.mutate(
+                  freshCards.map((c) => ({
+                    word: c.word, cardType: c.cardType,
+                    stability: c.stability, difficulty: c.difficulty,
+                    scheduledDays: c.scheduledDays, elapsedDays: c.elapsedDays,
+                    reps: c.reps, lapses: c.lapses, isLeech: c.isLeech,
+                    state: c.state, dueDate: c.dueDate, lastReviewed: c.lastReviewed,
+                    pinyin: c.pinyin, definition: c.definition,
+                    hskBand: c.hskBand, storyId: c.storyId, updatedAt: c.updatedAt,
+                  }))
+                );
+              }
+            } catch (e) {
+              console.warn("[Deck] Post-session sync failed (will retry on next background sync):", e);
+            }
           }}
         />
       </div>

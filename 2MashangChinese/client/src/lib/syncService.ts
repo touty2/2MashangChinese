@@ -10,20 +10,6 @@ const SYNC_INTERVAL = 3 * 60 * 1000; // 3 minutes
 export function getLastSyncTime() { return lastSyncTime; }
 export function shouldSync(): boolean { return Date.now() - lastSyncTime > SYNC_INTERVAL; }
 
-// ─── Merge helpers ────────────────────────────────────────────────────────────
-
-function mergeCards(local: FlashCard[], server: FlashCard[]): FlashCard[] {
-  const map = new Map<string, FlashCard>();
-  for (const c of local) map.set(`${c.word}:${c.cardType}`, c);
-  for (const c of server) {
-    const key = `${c.word}:${c.cardType}`;
-    const existing = map.get(key);
-    if (!existing || c.updatedAt > existing.updatedAt) map.set(key, c);
-  }
-  return Array.from(map.values());
-}
-
-/** Read completed story IDs from localStorage */
 function getLocalCompleted(): number[] {
   try { return JSON.parse(localStorage.getItem("mashang_completed") || "[]"); }
   catch { return []; }
@@ -79,8 +65,16 @@ export async function performSync(
       await utils.client.sync.deleteFlashcard.mutate({ word: c.word, cardType: c.cardType as "zh_en" | "en_zh" });
     }
 
-    const merged = mergeCards(localCards, serverCards.map(serverCardToLocal));
-    for (const card of merged) await updateCard(card);
+    // Only apply server cards that are genuinely newer than local — prevents
+    // a stale pull from overwriting cards we just pushed.
+    const localCardMap = new Map(localCards.map((c) => [`${c.word}:${c.cardType}`, c]));
+    const newerServerCards = serverCards.filter((c) => {
+      const local = localCardMap.get(`${c.word}:${c.cardType}`);
+      return !local || c.updatedAt > local.updatedAt;
+    });
+    for (const card of newerServerCards) {
+      await updateCard(serverCardToLocal(card));
+    }
 
     // ── 2. Completed stories ──────────────────────────────────────────────────
     try {

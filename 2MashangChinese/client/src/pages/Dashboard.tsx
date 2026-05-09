@@ -49,10 +49,18 @@ export default function Dashboard() {
 
   useEffect(() => { load(); }, [load]);
 
-  // Refresh whenever a background sync completes — keeps numbers current after tab switch
+  // Refresh whenever a background sync completes
   useEffect(() => {
     return onSyncComplete(() => { load(); });
   }, [onSyncComplete, load]);
+
+  // Reload every time the user returns to this tab — catches the case where
+  // they finished a review session and navigated back, or switched devices.
+  useEffect(() => {
+    const handler = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", handler);
+    return () => document.removeEventListener("visibilitychange", handler);
+  }, [load]);
 
   const greeting = user
     ? `Welcome back, ${user.name || user.email.split("@")[0]}`
