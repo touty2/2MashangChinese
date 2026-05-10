@@ -52,10 +52,9 @@ function todayStr(): string {
   return `${y}-${m}-${day}`;
 }
 
-/** Stable session key: date + user + sorted deck IDs */
-export function makeSessionKey(deckIds: string[], userId?: string): string {
-  const userPart = userId ? `${userId}::` : "";
-  return `${todayStr()}::${userPart}${[...deckIds].sort().join(",")}`;
+/** Stable session key: date + sorted deck IDs (no userId — sessions survive login/logout) */
+export function makeSessionKey(deckIds: string[], _userId?: string): string {
+  return `${todayStr()}::${[...deckIds].sort().join(",")}`;
 }
 
 export function serializeKey(k: CardKey): string {

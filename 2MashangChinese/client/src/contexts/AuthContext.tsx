@@ -85,7 +85,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setHydrating(true);
       clearLocalUserData(emailToClear)
         .then(() => hydrateFromServer(utils))
-        .then(notifySync)
+        .then(notifySync)  // tell Dashboard/Deck to reload after hydration
         .catch(console.error)
         .finally(() => setHydrating(false));
     } else if (isSignOut) {

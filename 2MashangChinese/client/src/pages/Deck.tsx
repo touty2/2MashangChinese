@@ -177,18 +177,21 @@ function ReviewSession({
 
     // ── Re-insertion logic ────────────────────────────────────────────────────
     // FSRS sets dueDate a few minutes ahead for Again/Hard/Good on New or Learning
-    // cards (state=Learning). These must come back in the same session — exactly
-    // like Anki. Only "graduated" cards (state=Review, due in days) leave for good.
+    // cards (state=Learning). These MUST come back in the same session like Anki.
+    // Only graduated cards (state=Review, due in days) leave the session.
     //
-    // We re-insert the card 4 positions from the front of the remaining queue so
-    // it doesn't immediately follow itself, but returns relatively soon.
+    // IMPORTANT: we re-insert even when this is the last card (rest.length === 0).
+    // Previously the guard `rest.length > 0` meant rating Again on the last card
+    // ended the session immediately — the user was told "All done!" even though
+    // they just failed a card. That was wrong.
     const rest = queue.slice(1);
-    const DUE_SOON_MS = 20 * 60 * 1000; // cards due within 20 min → re-insert
+    const DUE_SOON_MS = 20 * 60 * 1000; // cards due within 20 min → learning phase
     const isDueSoon = updatedCard.dueDate - Date.now() < DUE_SOON_MS;
 
     let newQueue: FlashCard[];
-    if (isDueSoon && rest.length > 0) {
-      // Insert a few positions in — not immediately, but not at the very end
+    if (isDueSoon) {
+      // Re-insert a few positions ahead so the card doesn't immediately repeat
+      // but returns soon. Works even when rest is empty (last card).
       const insertAt = Math.min(rest.length, 4);
       newQueue = [...rest.slice(0, insertAt), updatedCard, ...rest.slice(insertAt)];
     } else {
@@ -990,6 +993,12 @@ export default function Deck() {
                     <StateChip state={card.state} />
                     <button
                       onClick={async () => {
+                        // Remove from deck membership first, then delete the flashcard
+                        const { getAllDeckMembers, removeWordFromDeck } = await import("@/lib/deckStore");
+                        const members = await getAllDeckMembers();
+                        for (const m of members.filter((m) => m.word === word)) {
+                          await removeWordFromDeck(m.deckId, word);
+                        }
                         await removeWord(word);
                         loadAll();
                         toast.success(`Removed "${word}" from deck`);

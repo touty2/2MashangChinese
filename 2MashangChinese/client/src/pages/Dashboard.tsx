@@ -32,14 +32,26 @@ export default function Dashboard() {
     ]);
     const deckWordSet = new Set([...mainDeckWords, ...myVocabWords]);
     const now = Date.now();
-    const dueInDeck = cards.filter((c) => deckWordSet.has(c.word) && c.dueDate <= now);
-    const dueWordSet = new Set(dueInDeck.map((c) => c.word));
-    const newCards = cards.filter((c) => c.state === 0 && deckWordSet.has(c.word));
+
+    // Only count words that are in a deck (same as Deck page)
+    const deckCards = cards.filter((c) => deckWordSet.has(c.word));
+
+    // Due today: dueDate <= now, one word counted once (not per card type)
+    const dueWords = new Set(
+      deckCards.filter((c) => c.dueDate <= now).map((c) => c.word)
+    );
+
+    // Unseen: state=0 (never reviewed) — these are words waiting to be introduced
+    // Use zh_en as canonical one-per-word
+    const unseenWords = new Set(
+      deckCards.filter((c) => c.state === 0 && c.cardType === "zh_en").map((c) => c.word)
+    );
+
     const completed = JSON.parse(localStorage.getItem("mashang_completed") || "[]") as number[];
     setStats({
-      totalCards: new Set(cards.filter((c) => deckWordSet.has(c.word)).map((c) => c.word)).size,
-      dueToday: dueWordSet.size,
-      newCards: new Set(newCards.map((c) => c.word)).size,
+      totalCards: new Set(deckCards.map((c) => c.word)).size,
+      dueToday: dueWords.size,
+      newCards: unseenWords.size,
       completedStories: completed.length,
       totalStories: stories.length,
     });
@@ -80,7 +92,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard icon={Layers}        label="Words in deck"  value={stats.totalCards}                               color="text-primary" />
         <StatCard icon={Target}        label="Due today"       value={stats.dueToday}                                color="text-amber-500" />
-        <StatCard icon={Flame}         label="New words"       value={stats.newCards}                                color="text-rose-500" />
+        <StatCard icon={Flame}         label="Unseen"          value={stats.newCards}                                color="text-rose-500" />
         <StatCard icon={CheckCircle2}  label="Stories read"    value={`${stats.completedStories}/${stats.totalStories}`} color="text-emerald-500" />
       </div>
 
