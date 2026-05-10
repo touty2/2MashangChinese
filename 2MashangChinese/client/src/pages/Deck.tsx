@@ -24,7 +24,7 @@ import {
 } from "@/lib/flashcardStore";
 import {
   getAllDecks, createDeck, renameDeck, deleteDeck,
-  getWordsInDeck, getDeckCounts, type LocalDeck,
+  getWordsInDeck, getDeckCounts, addWordToDeck, removeWordFromDeck, type LocalDeck,
   MAIN_DECK_ID, MY_VOCAB_ID
 } from "@/lib/deckStore";
 import { useSettings } from "@/contexts/SettingsContext";
@@ -32,7 +32,6 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { useAuth as useAuthContext } from "@/contexts/AuthContext";
 import { cn } from "@/lib/utils";
 import { addWord } from "@/lib/flashcardStore";
-import { addWordToDeck } from "@/lib/deckStore";
 import { loadDictionary, lookupWord } from "@/lib/dictionary";
 import { numericToTone } from "@/lib/pinyin";
 import {
@@ -621,15 +620,35 @@ export default function Deck() {
       getAllDecks(),
       getDeckCounts(),
     ]);
-    setAllCards(cards);
-    setDecks(allDecks);
-    setDeckCounts(counts);
 
+    // Build deck word sets from membership DB
     const sets: Record<string, Set<string>> = {};
     for (const deck of allDecks) {
       const words = await getWordsInDeck(deck.id);
       sets[deck.id] = new Set(words);
     }
+
+    // Reconcile: if a word is in deck membership but has no flashcard,
+    // remove the orphaned deck membership so counts stay accurate.
+    const cardWordSet = new Set(cards.map((c) => c.word));
+    for (const deck of allDecks) {
+      for (const word of sets[deck.id]) {
+        if (!cardWordSet.has(word)) {
+          await removeWordFromDeck(deck.id, word);
+          sets[deck.id].delete(word);
+        }
+      }
+    }
+
+    // Recompute counts after reconciliation
+    const reconciledCounts: Record<string, number> = {};
+    for (const [deckId, wordSet] of Object.entries(sets)) {
+      reconciledCounts[deckId] = wordSet.size;
+    }
+
+    setAllCards(cards);
+    setDecks(allDecks);
+    setDeckCounts(reconciledCounts);
     setDeckWordSets(sets);
     setLoading(false);
   }, []);
@@ -993,15 +1012,13 @@ export default function Deck() {
                     <StateChip state={card.state} />
                     <button
                       onClick={async () => {
-                        // Remove from deck membership first, then delete the flashcard
-                        const { getAllDeckMembers, removeWordFromDeck } = await import("@/lib/deckStore");
-                        const members = await getAllDeckMembers();
-                        for (const m of members.filter((m) => m.word === word)) {
-                          await removeWordFromDeck(m.deckId, word);
+                        // Remove from every deck this word belongs to, then delete the flashcard
+                        for (const deck of decks) {
+                          await removeWordFromDeck(deck.id, word);
                         }
                         await removeWord(word);
                         loadAll();
-                        toast.success(`Removed "${word}" from deck`);
+                        toast.success(`Removed "${word}"`);
                       }}
                       className="p-1 rounded opacity-0 group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive transition-all"
                     >

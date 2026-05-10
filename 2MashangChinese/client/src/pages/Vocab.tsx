@@ -151,16 +151,20 @@ export default function Vocab() {
 
   useEffect(() => {
     async function load() {
-      // Load dictionary in parallel so it's ready when the user opens Add Word
-      const [stories, cards, decks] = await Promise.all([
+      const [stories, cards, decks, mainDeckWords, myVocabWords] = await Promise.all([
         loadStories(),
         getAllCards(),
         getAllDecks(),
+        getWordsInDeck(MAIN_DECK_ID),
+        getWordsInDeck(MY_VOCAB_ID),
         loadDictionary(),
       ]);
       const vocab = getUniqueVocab(stories);
       setAllVocab(vocab);
-      setDeckWords(new Set(cards.map((c) => c.word)));
+      // deckWords must reflect DECK MEMBERSHIP, not flashcard existence.
+      // Previously this used cards.map(c => c.word) which meant any word with
+      // a flashcard showed as "in deck" even if it wasn't in any deck.
+      setDeckWords(new Set([...mainDeckWords, ...myVocabWords]));
       setAvailableDecks(decks);
       await refreshMyWords(cards);
       setLoading(false);
@@ -243,7 +247,11 @@ export default function Vocab() {
   }, []);
 
   const handleRemove = useCallback(async (v: StoryVocab & { hskBand?: string }) => {
-    await removeWordFromDeck(MAIN_DECK_ID, v.word);
+    // Remove from every deck this word belongs to, then delete the flashcard
+    const allDecks = await getAllDecks();
+    for (const deck of allDecks) {
+      await removeWordFromDeck(deck.id, v.word);
+    }
     await removeWord(v.word);
     setDeckWords((prev) => { const n = new Set(prev); n.delete(v.word); return n; });
     toast.success(`Removed "${v.word}" from deck`);

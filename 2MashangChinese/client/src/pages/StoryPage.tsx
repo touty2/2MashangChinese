@@ -13,8 +13,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { toast } from "sonner";
 import { loadStories, type Story, type StoryVocab } from "@/lib/stories";
 import { loadDictionary, lookupWord, type DictEntry } from "@/lib/dictionary";
-import { addWord, removeWord, hasWord } from "@/lib/flashcardStore";
-import { addWordToDeck, removeWordFromDeck, MAIN_DECK_ID } from "@/lib/deckStore";
+import { addWord, removeWord } from "@/lib/flashcardStore";
+import { addWordToDeck, removeWordFromDeck, isWordInDeck, getWordsInDeck, MAIN_DECK_ID, MY_VOCAB_ID } from "@/lib/deckStore";
 import { trpc } from "@/lib/trpc";
 import { useSettings } from "@/contexts/SettingsContext";
 import { cn } from "@/lib/utils";
@@ -399,9 +399,12 @@ export default function StoryPage() {
   useEffect(() => {
     if (!story) return;
     async function loadDeckWords() {
-      const { getAllCards } = await import("@/lib/flashcardStore");
-      const cards = await getAllCards();
-      setDeckWords(new Set(cards.map((c) => c.word)));
+      const { getWordsInDeck } = await import("@/lib/deckStore");
+      const [mainWords, myVocabWords] = await Promise.all([
+        getWordsInDeck(MAIN_DECK_ID),
+        getWordsInDeck(MY_VOCAB_ID),
+      ]);
+      setDeckWords(new Set([...mainWords, ...myVocabWords]));
     }
     loadDeckWords();
   }, [story]);
@@ -433,7 +436,7 @@ export default function StoryPage() {
     }
     const entry = await lookupWord(word);
     setSelectedEntry(entry);
-    const inDeck = await hasWord(word);
+    const inDeck = await isWordInDeck(MAIN_DECK_ID, word);
     setWordInDeck(inDeck);
     if (settings.playAudioOnFlip) tts.speak(word);
   }, [selectedWord, selectedWordIdx, story, settings.playAudioOnFlip, tts]);
