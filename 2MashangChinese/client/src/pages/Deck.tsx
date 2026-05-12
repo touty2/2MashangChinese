@@ -257,7 +257,10 @@ function ReviewSession({
     );
   }
 
-  const progress = Math.round((reviewed / (reviewed + queue.length)) * 100);
+  // Progress uses the ORIGINAL queue length as the denominator so the total
+  // never increases when learning cards are re-inserted into the queue.
+  const originalTotal = originalQueueRef.current.length;
+  const progress = Math.min(100, Math.round((reviewedKeys.size / Math.max(originalTotal, 1)) * 100));
   const isFront = current.cardType === "zh_en";
 
   const intervals = flipped ? {
@@ -275,7 +278,7 @@ function ReviewSession({
       {/* Progress bar */}
       <div className="space-y-1">
         <div className="flex justify-between text-xs text-muted-foreground">
-          <span>{reviewed} / {reviewed + queue.length}</span>
+          <span>{reviewedKeys.size} / {originalTotal}</span>
           <span>{queue.length} left</span>
         </div>
         <Progress value={progress} className="h-1" />
@@ -824,7 +827,12 @@ export default function Deck() {
   }, [shouldAutoResume, reviewing, loading]);
 
   // Completed session: show "All done" screen if session is done and no new cards
-  const sessionCompletedToday = sessionLoaded && persistedSession?.isDone === true && filteredDueCards.length === 0;
+  // Once today's session is marked done, show "All done" regardless of whether
+  // learning-step cards have re-become due. The filteredDueCards === 0 guard was
+  // the root cause of the infinite "session complete → review button → session
+  // complete instantly" loop: Again-rated cards (1-min interval) expire before
+  // loadAll() runs, making filteredDueCards > 0 even though everything was reviewed.
+  const sessionCompletedToday = sessionLoaded && persistedSession?.isDone === true;
 
   if (reviewing) {
     return (
